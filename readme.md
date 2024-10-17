@@ -2,7 +2,7 @@
 
 Create a kasten blueprint that trigger a backup on any cnpg cluster in your namespaces.
 
-## Limitation 
+## Limitations 
 
 Kasten and EDB has developped [a partnership to fully support EDB cluster](https://veeamkasten.dev/edb-and-kasten).
 It includes : 
@@ -208,6 +208,16 @@ kubectl create -f cnpg-blueprint.yaml
 With kasten create a backup of the namespace `my-cnpg-app` check if a new backup object has been created.
 
 Delete the restorepoint and check if the backup object has been removed.
+
+# Making sure you "backup" all the "backups"
+
+The blueprint create a cnpg backup object during the blueprint backup action, but when blueprint backup action
+are triggered Kasten has already captured all the specs and the new cnpg backup object won't be included in the 
+restorepoint. 
+
+You should create another policy that only capture cnpg backup object. This policy can have a high frequency because
+it only capture cnpg backup objects.
+
 
 
 
