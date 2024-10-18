@@ -14,9 +14,4 @@ spec:
         values:
         - group: postgresql.cnpg.io
           resource: clusters
-    - annotations:
-        key: kanister.kasten.io/blueprint
-        operator: DoesNotExist
-    - annotations:
-        key: kanister.kasten.io/nobackup
-        operator: DoesNotExist
+          # version: v1

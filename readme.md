@@ -199,13 +199,13 @@ your kubernetes cluster.
 - The blueprint binding will bind any cnpg database to the blueprint
 
 ```
-kubectl create -f cnpg-blueprint-binding.yaml
 kubectl create -f cnpg-blueprint.yaml
+kubectl create -f cnpg-blueprint-binding.yaml
 ```
 
 # Test it 
 
-With kasten create a backup of the namespace `my-cnpg-app` check if a new backup object has been created.
+With kasten create a backup of the namespace `my-cnpg-app` (define a profile for kanister action this is mandatory even if we don't define it) check if a new backup object has been created.
 
 Delete the restorepoint and check if the backup object has been removed.
 
