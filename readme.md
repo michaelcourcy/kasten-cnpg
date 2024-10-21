@@ -1,6 +1,6 @@
 # Goal 
 
-Create a kasten blueprint that trigger a backup on any cnpg cluster in your namespaces.
+Create a kasten blueprint that trigger a barman backup on any cnpg cluster in your namespaces.
 
 ## Limitations 
 
@@ -111,7 +111,7 @@ cluster-example   7m35s   3           3       Cluster in healthy state   cluster
 ## creating some data 
 
 ```
-k exec -it $CLUSTER_NAME-1 -- bash
+kubectl exec -it $CLUSTER_NAME-1 -- bash
 psql
 ```
 
@@ -171,7 +171,7 @@ as they were at the time of the backup.
 
 For that we are creating another cluster `$CLUSTER_NAME-$BACKUP` reflecting those datas
 ```
-BACKUP=$(kubectl get -n $NAMESPACE backups.postgresql.cnpg.io -o jsonpath='{.items[0].metadata.name}')
+BACKUP=$(kubectl get  -n $NAMESPACE backups.postgresql.cnpg.io -o jsonpath='{.items[0].metadata.name}')
 cat<<EOF |kubectl create -n $NAMESPACE -f -
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -217,6 +217,121 @@ restorepoint.
 
 You should create another policy that only capture cnpg backup object. This policy can have a high frequency because
 it only capture cnpg backup objects.
+
+# Restore after a disaster 
+
+Let's simulate a complete disaster by deleting the namespace 
+```
+kubectl delete ns $NAMESPACE
+```
+
+Now all the backup objects are gone and cannot be restored because the operator will remove the status information at creation. 
+We need to work from the restore point where we can extract status informations.
+
+## Prepare with the restore point 
+
+Go to the restorepoint and capture the spec of a backup using the UI. 
+![capture spec](./capture-spec-in-rpc.png)
+
+use jq to get a better output for instance 
+```
+backup='{"apiVersion":"postgresql.cnpg.io/v1","kind":"Backup","metadata":{"creationTimestamp":"2024-10-21T13:14:47Z","generation":1,"managedFields":[{"apiVersion":"postgresql.cnpg.io/v1","fieldsType":"FieldsV1","fieldsV1":{"f:spec":{".":{},"f:cluster":{".":{},"f:name":{}},"f:method":{}}},"manager":"kubectl-create","operation":"Update","time":"2024-10-21T13:14:47Z"},{"apiVersion":"postgresql.cnpg.io/v1","fieldsType":"FieldsV1","fieldsV1":{"f:status":{".":{},"f:backupId":{},"f:backupName":{},"f:beginLSN":{},"f:beginWal":{},"f:destinationPath":{},"f:endLSN":{},"f:endWal":{},"f:endpointURL":{},"f:instanceID":{".":{},"f:ContainerID":{},"f:podName":{}},"f:method":{},"f:phase":{},"f:s3Credentials":{".":{},"f:accessKeyId":{".":{},"f:key":{},"f:name":{}},"f:secretAccessKey":{".":{},"f:key":{},"f:name":{}}},"f:serverName":{},"f:startedAt":{},"f:stoppedAt":{}}},"manager":"manager","operation":"Update","subresource":"status","time":"2024-10-21T13:15:00Z"}],"name":"backup-1","namespace":"my-cnpg-app","resourceVersion":"5125201","uid":"db85b43e-f651-4069-b07c-e0381afae038"},"spec":{"cluster":{"name":"cluster-example"},"method":"barmanObjectStore"},"status":{"backupId":"20241021T131448","backupName":"backup-20241021131447","beginLSN":"0/5000028","beginWal":"000000010000000000000005","destinationPath":"s3://barman","endLSN":"0/6064A40","endWal":"000000010000000000000006","endpointURL":"http://minio.kasten-io.svc.cluster.local:9000","instanceID":{"ContainerID":"containerd://0b2dcdd36ee08f09e8f6de17c94dd82126d083f1d560c9dbf37e8fe887215624","podName":"cluster-example-2"},"method":"barmanObjectStore","phase":"completed","s3Credentials":{"accessKeyId":{"key":"aws_access_key_id","name":"barman"},"secretAccessKey":{"key":"aws_secret_access_key","name":"barman"}},"serverName":"cluster-example","startedAt":"2024-10-21T13:14:48Z","stoppedAt":"2024-10-21T13:14:59Z"}}'
+
+echo $backup |jq '.status'
+{
+  "backupId": "20241021T131448",
+  "backupName": "backup-20241021131447",
+  "beginLSN": "0/5000028",
+  "beginWal": "000000010000000000000005",
+  "destinationPath": "s3://barman",
+  "endLSN": "0/6064A40",
+  "endWal": "000000010000000000000006",
+  "endpointURL": "http://minio.kasten-io.svc.cluster.local:9000",
+  "instanceID": {
+    "ContainerID": "containerd://0b2dcdd36ee08f09e8f6de17c94dd82126d083f1d560c9dbf37e8fe887215624",
+    "podName": "cluster-example-2"
+  },
+  "method": "barmanObjectStore",
+  "phase": "completed",
+  "s3Credentials": {
+    "accessKeyId": {
+      "key": "aws_access_key_id",
+      "name": "barman"
+    },
+    "secretAccessKey": {
+      "key": "aws_secret_access_key",
+      "name": "barman"
+    }
+  },
+  "serverName": "cluster-example",
+  "startedAt": "2024-10-21T13:14:48Z",
+  "stoppedAt": "2024-10-21T13:14:59Z"
+}
+```
+
+This information will be useful later to restore the cluster. 
+
+From the restore point now restore only the 2 secrets: 
+1. barman: to access the minio cluster 
+2. The app user to restart the database with the same credentials for the app database here it's `cluster-example-app`([this is not mandatory](https://cloudnative-pg.io/documentation/1.20/recovery/#additional-considerations))
+
+![Restore only secrets](./restore-only-barman-and-app.png)
+
+## Restore by recreating a cluster with a recovery bootstrap 
+
+```
+SIZE=1Gi
+SECRET=barman
+SUPER_SECRET=cluster-example-app
+NAMESPACE=my-cnpg-app
+
+SOURCE_CLUSTER=$(echo $backup |jq -r '.spec.cluster.name')
+CLUSTER_NAME_RESTORED=$SOURCE_CLUSTER-restored
+DESTINATION_PATH=$(echo $backup |jq -r '.status.destinationPath')
+ENDPOINT_URL=$(echo $backup |jq -r '.status.endpointURL')
+BACKUP_ID=$(echo $backup |jq -r '.status.backupId')
+
+cat<<EOF |kubectl create -n $NAMESPACE -f -
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: $CLUSTER_NAME_RESTORED
+spec:
+  superuserSecret: 
+    name: $SUPER_SECRET
+  instances: 3
+  storage:
+    size: $SIZE
+  bootstrap:
+    recovery:
+      source: $SOURCE_CLUSTER
+      recoveryTarget:
+        backupID: $BACKUP_ID
+        # if you need a PITR choose a date after the backup date
+        # targetTime: "2024-10-21T13:14:48"        
+  
+  externalClusters:
+    - name: $SOURCE_CLUSTER
+      barmanObjectStore:
+        endpointURL: $ENDPOINT_URL
+        wal:
+          compression: gzip
+          # our minio install does not suport kms encryption         
+          encryption: ""
+        destinationPath: $DESTINATION_PATH
+        s3Credentials:
+          accessKeyId:
+            name: $SECRET
+            key: aws_access_key_id
+          secretAccessKey:
+            name: $SECRET
+            key: aws_secret_access_key
+EOF
+```
+
+
+
+
 
 
 
