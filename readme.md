@@ -329,6 +329,7 @@ spec:
 EOF
 ```
 
+You can now check in this cluster that you get back your links table with the one line you created previously.
 
 
 
